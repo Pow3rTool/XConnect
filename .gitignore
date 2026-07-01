@@ -1,0 +1,19 @@
+hosts.json
+*.bak
+*.bak.*
+__pycache__/
+*.pyc
+venv/
+.env
+*.pem
+*.key
+id_*
+
+# build output
+/xconnect
+/XConnect
+
+# local state / stray artifacts (never commit binary DBs)
+*.db
+*.sqlite
+*.sqlite3

@@ -1,0 +1,11 @@
+# keep the build context tiny AND never bake secrets/binaries into the image
+.git/
+etc/                 # identity cert/KEY/ca-bundle — mounted at runtime, never baked
+xconnect             # prebuilt (dynamic) binary — we compile fresh in-stage
+XConnect             # prebuilt static binary — same
+mcp/                 # the bridge is a separate image (mcp/Dockerfile)
+deploy/
+prompts/
+*.bak.*
+*.md
+LICENSE

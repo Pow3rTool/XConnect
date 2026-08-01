@@ -24,6 +24,15 @@ type ControlClient struct {
 	instanceID string
 }
 
+const (
+	// Most control-plane replies are policy/metadata and should stay small. A
+	// release reply is the one deliberate exception: the static RCON binary is
+	// base64-encoded in JSON, so the current ~7 MiB artifact is ~9.5 MiB on the
+	// wire. Keep that larger allowance scoped only to update_for.
+	controlResponseLimit = int64(1 << 20)
+	updateResponseLimit  = int64(16 << 20)
+)
+
 func newControlClient(id *Identity, baseURL, expectedServerID string) *ControlClient {
 	verify := func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
@@ -132,8 +141,9 @@ func (c *ControlClient) shipCalls(calls []callEvent) error {
 // updateFor asks the tower whether a node is behind its channel's target; the
 // reply carries the Orthanc-signed binary (b64) when an update is due.
 func (c *ControlClient) updateFor(svid, currentVersion, goos, goarch string) (map[string]any, error) {
-	return c.call("/control/v1/update_for", map[string]any{
-		"svid": svid, "current_version": currentVersion, "goos": goos, "goarch": goarch})
+	return c.callWithLimit("/control/v1/update_for", map[string]any{
+		"svid": svid, "current_version": currentVersion, "goos": goos, "goarch": goarch},
+		updateResponseLimit)
 }
 
 // signRenew relays a renewal CSR to Orthanc (purpose=renew, key-continuity);
@@ -225,6 +235,10 @@ func (c *ControlClient) authorize(p *principal, verb string) (bool, string, erro
 }
 
 func (c *ControlClient) call(method string, reqBody any) (map[string]any, error) {
+	return c.callWithLimit(method, reqBody, controlResponseLimit)
+}
+
+func (c *ControlClient) callWithLimit(method string, reqBody any, responseLimit int64) (map[string]any, error) {
 	var buf bytes.Buffer
 	if reqBody != nil {
 		if err := json.NewEncoder(&buf).Encode(reqBody); err != nil {
@@ -236,11 +250,20 @@ func (c *ControlClient) call(method string, reqBody any) (map[string]any, error)
 		return nil, err
 	}
 	defer resp.Body.Close()
-	// Cap the control-link response like the data-plane read (broker.go): a
-	// compromised/buggy Orthanc must not be able to OOM us with an unbounded body.
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Read one byte beyond the cap so truncation is explicit. Previously every
+	// response was silently cut at 1 MiB and json.Unmarshal errors were ignored;
+	// that made signed release replies disappear without an error or log entry.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, responseLimit+1))
+	if err != nil {
+		return nil, fmt.Errorf("control %s: read response: %w", method, err)
+	}
+	if int64(len(data)) > responseLimit {
+		return nil, fmt.Errorf("control %s: response exceeds %d-byte limit", method, responseLimit)
+	}
 	var out map[string]any
-	_ = json.Unmarshal(data, &out)
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("control %s: invalid JSON response: %w", method, err)
+	}
 	if resp.StatusCode >= 400 {
 		return out, fmt.Errorf("control %s -> HTTP %d: %v", method, resp.StatusCode, out["error"])
 	}

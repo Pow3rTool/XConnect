@@ -61,10 +61,10 @@ func (cl *Caller) recordStart(ev *callEvent) {
 }
 
 type principal struct {
-	UPN    string
-	OID    string
-	TID    string
-	Name   string
+	UPN  string
+	OID  string
+	TID  string
+	Name string
 	// AppID / AppName identify the AGENT — the OAuth client app that obtained this
 	// token on the user's behalf (OBO `azp`/`appid`, with `app_displayname` for the
 	// friendly name). Lets an operator tell WHICH of an admin's several agents made
@@ -276,6 +276,27 @@ func (cl *Caller) verbHandler(verb, rconPath string) http.HandlerFunc {
 	}
 }
 
+// writeMetadataRequested detects the additive write capability without trying
+// to validate its values (RCON is the filesystem authority and performs that
+// validation). Non-string values still count as a request, so they take the
+// fail-closed endpoint and are rejected by RCON's typed JSON decoder.
+func writeMetadataRequested(body map[string]any) bool {
+	for _, key := range []string{"owner", "group", "mode"} {
+		value, ok := body[key]
+		if !ok || value == nil {
+			continue
+		}
+		if s, ok := value.(string); !ok || strings.TrimSpace(s) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func metadataEndpointUnsupported(injectOut string) bool {
+	return strings.HasPrefix(injectOut, "HTTP 404 ")
+}
+
 // fileVerbHandler forwards a file primitive (read/edit/write) to the node:
 // authorize (principal, verb) at Orthanc, resolve the target, then relay the
 // request body (minus "node") straight to the RCON path — so path / content /
@@ -329,7 +350,7 @@ func (cl *Caller) fileVerbHandler(verb, rconPath string) http.HandlerFunc {
 			if len(candidates) > 0 {
 				ev.Status = "ambiguous"
 				callerJSON(w, 409, map[string]any{
-					"error": fmt.Sprintf("%q matches %d nodes — re-issue with an exact node_id from candidates", node, len(candidates)),
+					"error":      fmt.Sprintf("%q matches %d nodes — re-issue with an exact node_id from candidates", node, len(candidates)),
 					"candidates": candidates})
 				return
 			}
@@ -337,16 +358,32 @@ func (cl *Caller) fileVerbHandler(verb, rconPath string) http.HandlerFunc {
 			callerJSON(w, 404, map[string]any{"error": "no live tunnel for node " + node})
 			return
 		}
+		targetPath := rconPath
+		metadataWrite := rconPath == "/write" && writeMetadataRequested(body)
+		if metadataWrite {
+			// A separate additive endpoint makes older RCONs fail closed with
+			// 404 instead of silently ignoring unknown owner/group/mode fields.
+			targetPath = "/write-metadata"
+		}
 		// Past the perimeter with a live tunnel: mark it running and carry the
 		// RequestID into the RCON body (correlation token only, never the principal).
 		cl.recordStart(&ev)
 		delete(body, "node")
 		body["rid"] = ev.RequestID
 		raw, _ := json.Marshal(body)
-		out, err := cl.broker.Inject(svid, "POST", rconPath, bytes.NewReader(raw))
+		out, err := cl.broker.Inject(svid, "POST", targetPath, bytes.NewReader(raw))
 		if err != nil {
 			ev.Status = "error:inject"
 			callerJSON(w, 502, map[string]any{"error": err.Error()})
+			return
+		}
+		if metadataWrite && metadataEndpointUnsupported(out) {
+			ev.Status = "unsupported"
+			ev.captureResult(out)
+			callerJSON(w, 409, map[string]any{
+				"error": "target RCON does not support remote_write owner/group/mode; update the node first",
+				"node":  svid,
+			})
 			return
 		}
 		ev.Status = "ok"

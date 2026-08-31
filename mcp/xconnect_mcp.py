@@ -276,11 +276,33 @@ def remote_write(
     expected_hash: Annotated[str, Field(default="", description="`hash` from remote_read when overwriting an existing file (the guard).")] = "",
     force: Annotated[bool, Field(default=False, description="Overwrite an existing file blindly (no expected_hash). Use sparingly.")] = False,
     make_dirs: Annotated[bool, Field(default=False, description="Create parent directories if missing.")] = False,
+    owner: Annotated[
+        str,
+        Field(default="", description="Set the file owner after writing, as a local user name or decimal UID."),
+    ] = "",
+    group: Annotated[
+        str,
+        Field(default="", description="Set the file group after writing, as a local group name or decimal GID."),
+    ] = "",
+    mode: Annotated[
+        str,
+        Field(
+            default="",
+            pattern=r"^(?:0o)?0?[0-7]{3}$",
+            description=(
+                "Set exact file permission bits after writing, as an octal string "
+                "such as '0640'. Special setuid/setgid/sticky bits are refused."
+            ),
+            examples=["0600", "0640", "0755"],
+        ),
+    ] = "",
 ) -> str:
     """Create or overwrite a file on a node with `content`. Creating a new file
     just works. Overwriting an EXISTING file is refused (409) unless you pass
     `expected_hash` from a remote_read (preferred — proves you saw the current
-    contents) or force=true (blind overwrite). Requires 'full' access."""
+    contents) or force=true (blind overwrite). Optional `owner`, `group`, and
+    `mode` metadata are validated by RCON before it writes the content. When
+    omitted, existing ownership/mode behavior is preserved. Requires 'full' access."""
     body = {"node": node, "path": path, "content": content}
     if expected_hash:
         body["expected_hash"] = expected_hash
@@ -288,6 +310,12 @@ def remote_write(
         body["force"] = True
     if make_dirs:
         body["make_dirs"] = True
+    if owner:
+        body["owner"] = owner
+    if group:
+        body["group"] = group
+    if mode:
+        body["mode"] = mode
     return _forward(ctx, "POST", "/v1/write", body)
 
 

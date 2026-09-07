@@ -323,13 +323,22 @@ def read_command_output(
             default="page",
             description=(
                 "page reads from a character offset; tail reads the final limit "
-                "characters; search applies a bounded RE2 regex line by line."
+                "characters; search applies a bounded RE2 regex line by line. "
+                "To tail output, set mode='tail' and limit to the number of "
+                "characters; do not pass a negative offset."
             ),
         ),
     ] = "page",
     offset: Annotated[
         int,
-        Field(default=0, ge=0, description="Zero-based character offset for page mode."),
+        Field(
+            default=0,
+            ge=0,
+            description=(
+                "Zero-based character offset for page mode. For final output, use "
+                "mode='tail' and limit=N; negative offsets are invalid."
+            ),
+        ),
     ] = 0,
     limit: Annotated[
         int,
@@ -371,6 +380,9 @@ def read_command_output(
     human identity, and agent application that created them. The server re-checks
     current authorization on every read. Use next_offset for page mode or
     next_start_line for search mode to continue.
+
+    To read the final N characters, set mode="tail" and limit=N. Do not use a
+    negative offset; offset is only a forward cursor for page mode.
     """
     return _forward(
         ctx,

@@ -144,6 +144,10 @@ class CaptureToolTests(unittest.TestCase):
             read_tool.parameters["properties"]["limit"]["maximum"],
             64000,
         )
+        self.assertIn(
+            "mode='tail'",
+            read_tool.parameters["properties"]["offset"]["description"],
+        )
 
 
 class StructuredResultTests(unittest.TestCase):

@@ -12,7 +12,7 @@
 #   * RCON signed bins  -> mount /opt/xconnect/rcon-dist ro (--bootstrap-bin-dir)
 #   * tenant/audience/control-url/auth-mode -> EnvironmentFile (source already reads env)
 #   * egress to login.microsoftonline.com (JWKS) + Orthanc :8443 (mTLS) -> --network=host
-FROM golang:1.26.5 AS build
+FROM golang:1.26.6 AS build
 WORKDIR /src
 # module layer cached separately from source
 COPY go.mod go.sum ./

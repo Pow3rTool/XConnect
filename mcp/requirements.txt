@@ -3,5 +3,5 @@
 # Direct imports are pinned here; pip resolves their transitive deps (anyio,
 # starlette, uvicorn, etc.). A full lockfile/SBOM is generated in CI (see S1).
 httpx==0.28.1
-mcp==1.28.0
+mcp==1.28.1
 pydantic==2.13.4

@@ -15,7 +15,7 @@ import json
 import os
 import re
 import urllib.parse
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
 from mcp import types as mcp_types
@@ -42,7 +42,9 @@ mcp = FastMCP(
         "3. `search_node_knowledge` — BEFORE you change anything on a node, read its shared "
         "knowledge (operator warnings, prior-agent notes, runbooks). After a material change, "
         "record what you learned with `append_node_knowledge` so the next agent inherits it.\n"
-        "4. `remote_run` for quick one-shot commands (returns stdout/exit, output bounded). "
+        "4. `remote_run` for quick one-shot commands. Large output returns a secure, "
+        "short-lived capture handle plus previews; use `read_command_output` to page, "
+        "tail, or search it. "
         "Use `remote_jobs` instead for anything long-running — it survives tunnel blips and "
         "is reattachable.\n\n"
         "ARGUMENTS: every run takes `node` (the target) and `command` (the shell line to run, "
@@ -149,6 +151,12 @@ def _response_result(response: httpx.Response) -> ToolCallResult:
     if remote_status is not None:
         payload["remote_http_status"] = remote_status
         payload["result"] = remote_result
+        if isinstance(remote_result, dict) and isinstance(
+            remote_result.get("output_capture"), dict
+        ):
+            # Make the handle easy for an agent to find without discarding the
+            # complete decoded RCON result shape.
+            payload["output_capture"] = remote_result["output_capture"]
 
     failed = not 200 <= response.status_code < 300
     if remote_status is not None:
@@ -219,8 +227,26 @@ def _resolve_command(command: str, cmd: str) -> str:
 
 
 @mcp.tool()
-def remote_run(node: _NODE, ctx: Context, command: _COMMAND = "",
-    cmd: Annotated[str, Field(default="", description="Alias for `command`; either name works.")] = "") -> ToolCallResult:
+def remote_run(
+    node: _NODE,
+    ctx: Context,
+    command: _COMMAND = "",
+    cmd: Annotated[
+        str,
+        Field(default="", description="Alias for `command`; either name works."),
+    ] = "",
+    capture_output: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "Force stdout/stderr into a secure 10-minute server-side capture and "
+                "return previews plus a capture_id. Output above 32 KiB is captured "
+                "automatically even when this is false."
+            ),
+        ),
+    ] = False,
+) -> ToolCallResult:
     """Run a ONE-SHOT shell command on a managed node and return its output.
 
     The remote equivalent of running a command in a terminal: the line runs via
@@ -243,7 +269,10 @@ def remote_run(node: _NODE, ctx: Context, command: _COMMAND = "",
             "e.g. 'uname -a').",
             example={"node": node or "<node-id-or-fragment>", "command": "hostname && uname -a"},
         )
-    return _forward(ctx, "POST", "/v1/run", {"node": node, "cmd": shell})
+    body = {"node": node, "cmd": shell}
+    if capture_output:
+        body["capture"] = True
+    return _forward(ctx, "POST", "/v1/run", body)
 
 
 @mcp.tool()
@@ -270,6 +299,95 @@ def remote_jobs(node: _NODE, ctx: Context, command: _COMMAND = "",
             example={"node": node or "<node-id-or-fragment>", "command": "long-running-cmd …"},
         )
     return _forward(ctx, "POST", "/v1/jobs", {"node": node, "cmd": shell})
+
+
+@mcp.tool()
+def read_command_output(
+    capture_id: Annotated[
+        str,
+        Field(
+            min_length=36,
+            max_length=36,
+            description="The capture_id returned by remote_run.",
+            examples=["cap_0123456789abcdef0123456789abcdef"],
+        ),
+    ],
+    ctx: Context,
+    stream: Annotated[
+        Literal["stdout", "stderr"],
+        Field(default="stdout", description="Which captured stream to inspect."),
+    ] = "stdout",
+    mode: Annotated[
+        Literal["page", "tail", "search"],
+        Field(
+            default="page",
+            description=(
+                "page reads from a character offset; tail reads the final limit "
+                "characters; search applies a bounded RE2 regex line by line."
+            ),
+        ),
+    ] = "page",
+    offset: Annotated[
+        int,
+        Field(default=0, ge=0, description="Zero-based character offset for page mode."),
+    ] = 0,
+    limit: Annotated[
+        int,
+        Field(
+            default=12000,
+            ge=1,
+            le=64000,
+            description="Maximum characters returned (default 12,000; hard max 64,000).",
+        ),
+    ] = 12000,
+    pattern: Annotated[
+        str,
+        Field(
+            default="",
+            max_length=256,
+            description="RE2 regular expression required by search mode.",
+        ),
+    ] = "",
+    start_line: Annotated[
+        int,
+        Field(
+            default=0,
+            ge=0,
+            description="Zero-based line at which search mode begins or resumes.",
+        ),
+    ] = 0,
+    context: Annotated[
+        int,
+        Field(default=0, ge=0, le=10, description="Context lines around search matches."),
+    ] = 0,
+    max_matches: Annotated[
+        int,
+        Field(default=20, ge=1, le=100, description="Maximum search matches returned."),
+    ] = 20,
+) -> ToolCallResult:
+    """Inspect a large remote_run result without loading all of it into context.
+
+    Captures are ephemeral (10 minutes), RAM-only, and scoped to the same tenant,
+    human identity, and agent application that created them. The server re-checks
+    current authorization on every read. Use next_offset for page mode or
+    next_start_line for search mode to continue.
+    """
+    return _forward(
+        ctx,
+        "POST",
+        "/v1/output/read",
+        {
+            "capture_id": capture_id,
+            "stream": stream,
+            "mode": mode,
+            "offset": offset,
+            "limit": limit,
+            "pattern": pattern,
+            "start_line": start_line,
+            "context": context,
+            "max_matches": max_matches,
+        },
+    )
 
 
 @mcp.tool()

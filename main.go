@@ -195,7 +195,7 @@ func main() {
 		go broker.renewSweep() // auto-renew node certs nearing expiry
 		go (&Bootstrap{control: c, binDir: *bootstrapBinDir,
 			publicURL: os.Getenv("XCONNECT_PUBLIC_BOOTSTRAP_URL")}).Serve(*bootstrapAddr)
-		caller := &Caller{broker: broker, control: c, calls: calls,
+		caller := &Caller{broker: broker, control: c, calls: calls, captures: NewCaptureStore(),
 			validate: newValidator(*authMode, *tenantID, *audience, *devSecret)}
 		go caller.Serve(*callerAddr)
 		_ = *webAddr // nginx fronts callerAddr as the XConnect vhost on :443

@@ -193,18 +193,43 @@ func (b *Broker) maybeUpdate(svid, healthSummary string) {
 	log.Printf("broker: %s update/apply -> %s", svid, res)
 }
 
-// Inject sends a request down a node's reverse tunnel and returns a summary.
-// (This is what a Caller request ultimately becomes; for now it's driven by the
-// on-connect health check.)
-func (b *Broker) Inject(svid, method, path string, body io.Reader) (string, error) {
+// injectResponseCap bounds a complete RCON JSON response. A /run response can
+// contain separately capped stdout + stderr strings whose JSON escaping makes
+// the wire body larger than either stream. Read one byte beyond the limit and
+// fail closed instead of silently returning half of a JSON document.
+const injectResponseCap = 16 << 20
+
+type injectResult struct {
+	StatusCode int
+	Body       []byte
+}
+
+func (result injectResult) Summary() string {
+	return fmt.Sprintf("HTTP %d %s", result.StatusCode, string(result.Body))
+}
+
+func readBoundedResponse(reader io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("RCON response exceeds %d-byte broker limit", limit)
+	}
+	return data, nil
+}
+
+// InjectResponse sends a request down a node's reverse tunnel and returns the
+// remote HTTP status and complete, bounded response body.
+func (b *Broker) InjectResponse(svid, method, path string, body io.Reader) (injectResult, error) {
 	v, ok := b.tunnels.Load(svid)
 	if !ok {
-		return "", fmt.Errorf("no live tunnel for %s", svid)
+		return injectResult{}, fmt.Errorf("no live tunnel for %s", svid)
 	}
 	cc := v.(*http2.ClientConn)
 	req, err := http.NewRequest(method, "https://rcon"+path, body)
 	if err != nil {
-		return "", err
+		return injectResult{}, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -216,11 +241,24 @@ func (b *Broker) Inject(svid, method, path string, body io.Reader) (string, erro
 			b.tunnels.Delete(svid)
 			log.Printf("broker: TUNNEL DOWN %s — reaped on inject error: %v", svid, err)
 		}
-		return "", err
+		return injectResult{}, err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return fmt.Sprintf("HTTP %d %s", resp.StatusCode, string(data)), nil
+	data, err := readBoundedResponse(resp.Body, injectResponseCap)
+	if err != nil {
+		return injectResult{}, err
+	}
+	return injectResult{StatusCode: resp.StatusCode, Body: data}, nil
+}
+
+// Inject preserves the historical summary interface used by health/update,
+// file verbs, and the disabled local admin endpoint.
+func (b *Broker) Inject(svid, method, path string, body io.Reader) (string, error) {
+	result, err := b.InjectResponse(svid, method, path, body)
+	if err != nil {
+		return "", err
+	}
+	return result.Summary(), nil
 }
 
 // renewWindow: renew a node's cert once it has less than this left.

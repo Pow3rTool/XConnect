@@ -71,6 +71,81 @@ class RemoteWriteMetadataTests(unittest.TestCase):
         )
 
 
+class CaptureToolTests(unittest.TestCase):
+    def test_remote_run_only_sends_capture_flag_when_forced(self) -> None:
+        ctx = object()
+        with patch.object(xconnect_mcp, "_forward", return_value="ok") as forward:
+            xconnect_mcp.remote_run(node="node-id", command="uname -a", ctx=ctx)
+            xconnect_mcp.remote_run(
+                node="node-id",
+                command="uname -a",
+                ctx=ctx,
+                capture_output=True,
+            )
+
+        self.assertEqual(
+            forward.call_args_list[0].args,
+            (ctx, "POST", "/v1/run", {"node": "node-id", "cmd": "uname -a"}),
+        )
+        self.assertEqual(
+            forward.call_args_list[1].args,
+            (
+                ctx,
+                "POST",
+                "/v1/run",
+                {"node": "node-id", "cmd": "uname -a", "capture": True},
+            ),
+        )
+
+    def test_read_command_output_forwards_bounded_navigation(self) -> None:
+        ctx = object()
+        capture_id = "cap_0123456789abcdef0123456789abcdef"
+        with patch.object(xconnect_mcp, "_forward", return_value="ok") as forward:
+            result = xconnect_mcp.read_command_output(
+                capture_id=capture_id,
+                ctx=ctx,
+                stream="stderr",
+                mode="search",
+                limit=4096,
+                pattern="ERROR|WARN",
+                start_line=10,
+                context=2,
+                max_matches=5,
+            )
+
+        self.assertEqual(result, "ok")
+        forward.assert_called_once_with(
+            ctx,
+            "POST",
+            "/v1/output/read",
+            {
+                "capture_id": capture_id,
+                "stream": "stderr",
+                "mode": "search",
+                "offset": 0,
+                "limit": 4096,
+                "pattern": "ERROR|WARN",
+                "start_line": 10,
+                "context": 2,
+                "max_matches": 5,
+            },
+        )
+
+    def test_capture_tools_advertise_constraints(self) -> None:
+        run_tool = xconnect_mcp.mcp._tool_manager.get_tool("remote_run")
+        read_tool = xconnect_mcp.mcp._tool_manager.get_tool("read_command_output")
+
+        self.assertIn("capture_output", run_tool.parameters["properties"])
+        self.assertEqual(
+            read_tool.parameters["properties"]["capture_id"]["minLength"],
+            36,
+        )
+        self.assertEqual(
+            read_tool.parameters["properties"]["limit"]["maximum"],
+            64000,
+        )
+
+
 class StructuredResultTests(unittest.TestCase):
     def test_nested_rcon_json_is_native_structured_content(self) -> None:
         response = httpx.Response(
@@ -93,6 +168,25 @@ class StructuredResultTests(unittest.TestCase):
         self.assertEqual(result.structuredContent["remote_http_status"], 200)
         self.assertEqual(result.structuredContent["result"]["stdout"], "hello\n")
         self.assertEqual(json.loads(result.content[0].text), result.structuredContent)
+
+    def test_capture_handle_is_hoisted_for_agent_navigation(self) -> None:
+        response = httpx.Response(
+            200,
+            json={
+                "result": (
+                    'HTTP 200 {"rc":0,"stdout":"preview","stderr":"",'
+                    '"output_capture":{"capture_id":'
+                    '"cap_0123456789abcdef0123456789abcdef"}}'
+                )
+            },
+        )
+
+        result = xconnect_mcp._response_result(response)
+
+        self.assertEqual(
+            result.structuredContent["output_capture"]["capture_id"],
+            "cap_0123456789abcdef0123456789abcdef",
+        )
 
     def test_nonzero_shell_exit_is_not_an_mcp_transport_error(self) -> None:
         response = httpx.Response(

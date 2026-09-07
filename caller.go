@@ -24,7 +24,8 @@ type Caller struct {
 	broker   *Broker
 	control  *ControlClient
 	validate func(string) (*principal, error)
-	calls    *CallLog // audit buffer; shipped to Orthanc on the heartbeat
+	calls    *CallLog      // audit buffer; shipped to Orthanc on the heartbeat
+	captures *CaptureStore // ephemeral command output; never shipped to Orthanc
 }
 
 // detailMax bounds the command/path summary we keep per audit event.
@@ -169,6 +170,7 @@ func (cl *Caller) Serve(addr string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/run", cl.verbHandler("run", "/run"))
 	mux.HandleFunc("POST /v1/jobs", cl.verbHandler("run", "/jobs"))
+	mux.HandleFunc("POST /v1/output/read", cl.outputReadHandler)
 	mux.HandleFunc("GET /v1/whoami", cl.whoamiHandler)
 	mux.HandleFunc("POST /v1/whoami", cl.whoamiHandler)
 	mux.HandleFunc("GET /v1/hosts", cl.hostsHandler)
@@ -207,10 +209,15 @@ func (cl *Caller) verbHandler(verb, rconPath string) http.HandlerFunc {
 		}()
 
 		var body struct {
-			Node string `json:"node"`
-			Cmd  string `json:"cmd"`
+			Node    string `json:"node"`
+			Cmd     string `json:"cmd"`
+			Capture bool   `json:"capture"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			ev.Status = "bad-request"
+			callerJSON(w, 400, map[string]any{"error": "body must match the run request schema"})
+			return
+		}
 		ev.Node, ev.Detail = body.Node, clip(body.Cmd, detailMax)
 		if body.Node == "" {
 			ev.Status = "bad-request"
@@ -257,14 +264,27 @@ func (cl *Caller) verbHandler(verb, rconPath string) http.HandlerFunc {
 		if body.Cmd != "" {
 			payload = strings.NewReader(fmt.Sprintf(`{"cmd":%q,"rid":%q}`, body.Cmd, ev.RequestID))
 		}
-		out, err := cl.broker.Inject(svid, "POST", rconPath, payload)
+		response, err := cl.broker.InjectResponse(svid, "POST", rconPath, payload)
 		if err != nil {
 			ev.Status = "error:inject"
 			callerJSON(w, 502, map[string]any{"error": err.Error()})
 			return
 		}
+		out := response.Summary()
 		ev.Status = "ok"
-		ev.captureResult(out) // store what the call DID for drill-down
+		ev.captureResult(out) // existing bounded Witchhunt audit behavior
+		clientResult := out
+		if rconPath == "/run" {
+			clientResult, err = cl.prepareRunResult(p, svid, verb, ev.RequestID, response, body.Capture)
+			if err != nil {
+				ev.Status = "error:capture"
+				callerJSON(w, 502, map[string]any{
+					"error": "command completed but its output could not be captured safely: " + err.Error(),
+					"node":  svid, "request_id": ev.RequestID,
+				})
+				return
+			}
+		}
 		if r.Context().Err() != nil {
 			// The caller disconnected while the node was still running. The command
 			// DID complete and we captured its result (status stays ok) — note the
@@ -272,8 +292,82 @@ func (cl *Caller) verbHandler(verb, rconPath string) http.HandlerFunc {
 			ev.Reason = "caller disconnected before response"
 		}
 		callerJSON(w, 200, map[string]any{"principal": p.UPN, "node": svid,
-			"result": out, "dur_ms": ev.DurMs})
+			"request_id": ev.RequestID, "result": clientResult, "dur_ms": ev.DurMs})
 	}
+}
+
+// outputReadHandler dereferences an ephemeral output capture. The id is only a
+// locator: ownership is bound to tenant + human + agent, and the original verb
+// is re-authorized on every read. The audit event contains navigation metadata,
+// never the returned output chunk.
+func (cl *Caller) outputReadHandler(w http.ResponseWriter, r *http.Request) {
+	p, err := cl.auth(r)
+	if err != nil {
+		callerJSON(w, 401, map[string]any{"error": err.Error()})
+		return
+	}
+	ev := callEvent{
+		TS: nowRFC3339(), RequestID: newID(), UPN: p.UPN, OID: p.OID,
+		TID: p.TID, App: p.AppID, AppName: p.AppName, Verb: "output_read",
+	}
+	defer func() {
+		log.Printf("CAPTURE principal=%s app=%s target=%s allowed=%v status=%s",
+			ev.UPN, ev.App, ev.SVID, ev.Allowed, ev.Status)
+		cl.record(&ev)
+	}()
+
+	var request outputReadRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		ev.Status = "bad-request"
+		callerJSON(w, 400, map[string]any{"error": "body must be a JSON object"})
+		return
+	}
+	if request.CaptureID == "" {
+		ev.Status = "bad-request"
+		callerJSON(w, 400, map[string]any{"error": "capture_id required"})
+		return
+	}
+	owner, stable := captureOwnerFor(p)
+	if !stable {
+		ev.Status = "denied"
+		callerJSON(w, 403, map[string]any{"error": "stable tenant, principal, and agent identity required"})
+		return
+	}
+	capture, found := cl.captures.Get(request.CaptureID, owner)
+	if !found {
+		ev.Status = "not-found"
+		callerJSON(w, 404, map[string]any{"error": errCaptureNotFound.Error()})
+		return
+	}
+	ev.Node, ev.SVID = capture.Node, capture.Node
+	ev.Detail = clip(fmt.Sprintf("stream=%s mode=%s", request.Stream, request.Mode), detailMax)
+
+	allowed, reason, err := cl.control.authorize(p, capture.Verb)
+	if err != nil {
+		ev.Status = "error:authz-unavailable"
+		callerJSON(w, 502, map[string]any{"error": "authz unavailable: " + err.Error()})
+		return
+	}
+	ev.Allowed, ev.Reason = allowed, reason
+	if !allowed {
+		ev.Status = "denied"
+		callerJSON(w, 403, map[string]any{"error": "not authorized", "reason": reason})
+		return
+	}
+
+	output, err := readCapturedOutput(capture, request)
+	if err != nil {
+		ev.Status = "bad-request"
+		callerJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	ev.Status = "ok"
+	callerJSON(w, 200, map[string]any{
+		"principal":         p.UPN,
+		"node":              capture.Node,
+		"source_request_id": capture.RequestID,
+		"output":            output,
+	})
 }
 
 // writeMetadataRequested detects the additive write capability without trying

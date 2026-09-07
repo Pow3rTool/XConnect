@@ -560,6 +560,9 @@ func searchCapturedOutput(content string, request outputReadRequest) (map[string
 			break
 		}
 	}
+	if !contentTruncated {
+		nextStart = len(lines)
+	}
 
 	return map[string]any{
 		"pattern":           request.Pattern,

@@ -167,6 +167,16 @@ func TestSearchCapturedOutputIsBoundedAndResumable(t *testing.T) {
 	if !strings.Contains(result["content"].(string), "2:ERROR one") {
 		t.Fatalf("search omitted matching line: %#v", result)
 	}
+	complete, err := readCapturedOutput(capture, outputReadRequest{
+		Stream: "stderr", Mode: "search", Pattern: "^ERROR",
+		Context: 1, Limit: 64_000, MaxMatches: 10,
+	})
+	if err != nil {
+		t.Fatalf("complete search: %v", err)
+	}
+	if complete["next_start_line"] != 5 || complete["eof"] != true || complete["content_truncated"] != false {
+		t.Fatalf("completed search did not report EOF: %#v", complete)
+	}
 
 	_, err = readCapturedOutput(capture, outputReadRequest{
 		Stream: "stderr", Mode: "search", Pattern: "[", Limit: 100,

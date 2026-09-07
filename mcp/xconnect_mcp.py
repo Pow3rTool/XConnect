@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.parse
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
+from mcp import types as mcp_types
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 XCONNECT_API = os.environ.get("XCONNECT_API", "http://127.0.0.1:8780")
 # Public host nginx proxies under (DNS-rebinding allow-list). Set MCP_PUBLIC_HOST
@@ -75,21 +77,111 @@ def _bearer(ctx: Context) -> str:
     return ""
 
 
-def _forward(ctx: Context, method: str, path: str, body: dict | None) -> str:
+class AgentToolResponse(BaseModel):
+    """Stable top-level schema shared by every XConnect tool result."""
+
+    model_config = ConfigDict(extra="allow")
+
+    ok: bool
+    http_status: int | None = None
+    remote_http_status: int | None = None
+    error: str | None = None
+
+
+ToolCallResult = Annotated[mcp_types.CallToolResult, AgentToolResponse]
+_LEGACY_REMOTE_RESULT = re.compile(r"^HTTP[ ]+([0-9]{3})(?:[ ](.*))?$", re.DOTALL)
+
+
+def _tool_result(payload: dict[str, Any], *, is_error: bool) -> ToolCallResult:
+    """Return native structuredContent plus the same JSON as a text fallback."""
+    fallback = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=fallback)],
+        structuredContent=payload,
+        isError=is_error,
+    )
+
+
+def _decode_remote_result(value: Any) -> tuple[int | None, Any]:
+    """Decode Caller's legacy 'HTTP <status> <json>' RCON response."""
+    if not isinstance(value, str):
+        return None, value
+    match = _LEGACY_REMOTE_RESULT.fullmatch(value)
+    if match is None:
+        return None, value
+    status = int(match.group(1))
+    body = match.group(2) or ""
+    try:
+        decoded: Any = json.loads(body)
+    except json.JSONDecodeError:
+        decoded = {"text": body}
+    return status, decoded
+
+
+def _response_result(response: httpx.Response) -> ToolCallResult:
+    try:
+        parsed: Any = response.json()
+    except (json.JSONDecodeError, ValueError):
+        return _tool_result(
+            {
+                "ok": False,
+                "http_status": response.status_code,
+                "error": "xconnect returned a non-JSON response",
+                "response": response.text,
+            },
+            is_error=True,
+        )
+
+    if not isinstance(parsed, dict):
+        return _tool_result(
+            {
+                "ok": False,
+                "http_status": response.status_code,
+                "error": "xconnect returned JSON that was not an object",
+                "response": parsed,
+            },
+            is_error=True,
+        )
+
+    payload: dict[str, Any] = dict(parsed)
+    payload["http_status"] = response.status_code
+    remote_status, remote_result = _decode_remote_result(payload.get("result"))
+    if remote_status is not None:
+        payload["remote_http_status"] = remote_status
+        payload["result"] = remote_result
+
+    failed = not 200 <= response.status_code < 300
+    if remote_status is not None:
+        failed = failed or not 200 <= remote_status < 300
+    failed = failed or bool(payload.get("error"))
+    payload["ok"] = not failed
+    if failed and not payload.get("error"):
+        failed_status = remote_status if remote_status is not None else response.status_code
+        payload["error"] = f"xconnect request failed with HTTP {failed_status}"
+    return _tool_result(payload, is_error=failed)
+
+
+def _forward(ctx: Context, method: str, path: str, body: dict | None) -> ToolCallResult:
     headers = {"Content-Type": "application/json"}
     auth = _bearer(ctx)
     if auth:
         headers["Authorization"] = auth
     try:
-        r = httpx.request(method, f"{XCONNECT_API}{path}", json=body, headers=headers, timeout=120)
-        return r.text
-    except httpx.HTTPError as e:
-        return _err(f"xconnect unreachable: {e}")
+        response = httpx.request(
+            method,
+            f"{XCONNECT_API}{path}",
+            json=body,
+            headers=headers,
+            timeout=120,
+        )
+        return _response_result(response)
+    except httpx.HTTPError as exc:
+        return _err(f"xconnect unreachable: {exc}")
 
 
-def _err(message: str, **extra: object) -> str:
+def _err(message: str, **extra: object) -> ToolCallResult:
     """A structured, self-correcting error the calling model can act on."""
-    return json.dumps({"error": message, **extra})
+    return _tool_result({"ok": False, "error": message, **extra}, is_error=True)
 
 
 # A node may be given as its full SPIFFE id or any unique fragment.
@@ -128,7 +220,7 @@ def _resolve_command(command: str, cmd: str) -> str:
 
 @mcp.tool()
 def remote_run(node: _NODE, ctx: Context, command: _COMMAND = "",
-    cmd: Annotated[str, Field(default="", description="Alias for `command`; either name works.")] = "") -> str:
+    cmd: Annotated[str, Field(default="", description="Alias for `command`; either name works.")] = "") -> ToolCallResult:
     """Run a ONE-SHOT shell command on a managed node and return its output.
 
     The remote equivalent of running a command in a terminal: the line runs via
@@ -156,7 +248,7 @@ def remote_run(node: _NODE, ctx: Context, command: _COMMAND = "",
 
 @mcp.tool()
 def remote_jobs(node: _NODE, ctx: Context, command: _COMMAND = "",
-    cmd: Annotated[str, Field(default="", description="Alias for `command`; either name works.")] = "") -> str:
+    cmd: Annotated[str, Field(default="", description="Alias for `command`; either name works.")] = "") -> ToolCallResult:
     """Start a LONG-RUNNING job on a node (use instead of remote_run for anything
     not near-instant).
 
@@ -199,7 +291,7 @@ def list_remote_hosts(
         int,
         Field(default=50, description="Max hosts to return (default 50)."),
     ] = 50,
-) -> str:
+) -> ToolCallResult:
     """Discover the nodes you can reach, BY HUMAN NAME. Start here to find a target.
 
     Returns each host as {name, description, svid, node_id, online}, plus
@@ -231,7 +323,7 @@ def remote_read(
     ctx: Context,
     offset: Annotated[int, Field(default=0, description="1-based start line (default: from the top).")] = 0,
     limit: Annotated[int, Field(default=0, description="Max lines to return (default: a large window).")] = 0,
-) -> str:
+) -> ToolCallResult:
     """Read a file on a managed node. Returns line-numbered content PLUS a `hash`
     — keep that hash: remote_edit/remote_write take it as `expected_hash` so your
     change is rejected (409 stale) if the file moved under you. Always read before
@@ -253,7 +345,7 @@ def remote_edit(
     ctx: Context,
     replace_all: Annotated[bool, Field(default=False, description="Replace every occurrence (else exactly one; ambiguous match → 409).")] = False,
     expected_hash: Annotated[str, Field(default="", description="The `hash` from your remote_read — the read-before-write guard.")] = "",
-) -> str:
+) -> ToolCallResult:
     """Make an in-place string replacement in a file on a node. `old_string` must
     match exactly and be unique unless replace_all=true (a multi-match without it
     is a 409 — add context). Pass `expected_hash` from a prior remote_read; if the
@@ -296,7 +388,7 @@ def remote_write(
             examples=["0600", "0640", "0755"],
         ),
     ] = "",
-) -> str:
+) -> ToolCallResult:
     """Create or overwrite a file on a node with `content`. Creating a new file
     just works. Overwriting an EXISTING file is refused (409) unless you pass
     `expected_hash` from a remote_read (preferred — proves you saw the current
@@ -331,7 +423,7 @@ def search_node_knowledge(
             "filter this node's recorded knowledge. Leave empty to get everything.",
         ),
     ] = "",
-) -> str:
+) -> ToolCallResult:
     """Read the shared, persistent KNOWLEDGE about a node — ALWAYS do this BEFORE you
     touch a box. This is the fabric's "wiki for agents": what previous operators and
     agents learned about this exact machine, so you inherit hard-won context instead
@@ -374,7 +466,7 @@ def append_node_knowledge(
         ),
     ],
     ctx: Context,
-) -> str:
+) -> ToolCallResult:
     """Record durable KNOWLEDGE about a node so the NEXT agent or operator inherits it
     — the write side of the shared "wiki for agents". Use this after you learn
     something material about a box: its layout, a hazard, a runbook, why a change was
@@ -391,7 +483,7 @@ def append_node_knowledge(
 
 
 @mcp.tool()
-def whoami(ctx: Context) -> str:
+def whoami(ctx: Context) -> ToolCallResult:
     """Show YOUR identity and permissions as the fabric sees them (no arguments).
 
     Returns your principal (UPN, object id, tenant, scopes) and the authorization
@@ -406,12 +498,10 @@ def whoami(ctx: Context) -> str:
 # expose none. Dropping those handlers makes get_capabilities() omit them — which
 # is both correct (we have no resources/prompts) and avoids MCP clients that tear
 # the connection down inside their resource/prompt discovery step.
-from mcp import types as _mcptypes  # noqa: E402
-
 for _rt in (
-    _mcptypes.ListResourcesRequest, _mcptypes.ReadResourceRequest,
-    _mcptypes.ListResourceTemplatesRequest, _mcptypes.ListPromptsRequest,
-    _mcptypes.GetPromptRequest, _mcptypes.SubscribeRequest, _mcptypes.UnsubscribeRequest,
+    mcp_types.ListResourcesRequest, mcp_types.ReadResourceRequest,
+    mcp_types.ListResourceTemplatesRequest, mcp_types.ListPromptsRequest,
+    mcp_types.GetPromptRequest, mcp_types.SubscribeRequest, mcp_types.UnsubscribeRequest,
 ):
     mcp._mcp_server.request_handlers.pop(_rt, None)
 

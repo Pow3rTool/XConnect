@@ -68,12 +68,17 @@ and revocation proven. The two data-plane listeners are still stubs.
 
 ### Build & run
 ```bash
-cd /nfs/pow3rtool/XConnect && /usr/local/go/bin/go build -o xconnect .
+cd /opt/xconnect && /usr/local/go/bin/go build -o xconnect .
 # identity (key/cert/ca-bundle) minted on the tower into ./etc :
-#   (Orthanc) manage.py mint_system_identity --tenant 3lab --role xconnect --out /nfs/pow3rtool/XConnect/etc
+#   (Orthanc) manage.py mint_system_identity --tenant example --role xconnect --out /etc/xconnect
 ./xconnect whoami                 # prints our SVID
 ./xconnect control hello          # proves the link + tenant scoping
 ./xconnect control allowlist      # ACTIVE node SVIDs for our tenant only
 ```
 Flags: `--etc`, `--control-url` (default `https://127.0.0.1:8443`), `--server-id`,
 `--broker-port`, `--web-addr`. See [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+
+The portable defaults are `/etc/xconnect` for identity and
+`/var/lib/xconnect/binaries` for bootstrap artifacts. Existing installations
+using other locations should keep explicit `--etc` and `--bootstrap-bin-dir`
+arguments. Service examples assume a source checkout under `/opt/xconnect`.

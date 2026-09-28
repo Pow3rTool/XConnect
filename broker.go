@@ -32,8 +32,10 @@ type Broker struct {
 // nodeVer is a node's self-reported runtime, captured from its /health at connect
 // and relayed up to Orthanc on the heartbeat report (operator version visibility).
 type nodeVer struct {
-	Version, GOARCH string
-	Protocol        int // wire-contract version reported in /health (0 = pre-protocol node)
+	Version, GOOS, GOARCH, Shell string
+	OSVersion                    string          `json:"os_version"`
+	Capabilities                 map[string]bool `json:"capabilities"`
+	Protocol                     int             // wire-contract version reported in /health (0 = pre-protocol node)
 }
 
 func (b *Broker) Listen(addr string) error {
@@ -122,15 +124,12 @@ func (b *Broker) handle(conn net.Conn) {
 // recordVersion caches a node's running version/arch parsed from its /health body,
 // so the heartbeat report can tell Orthanc what each node is actually running.
 func (b *Broker) recordVersion(svid, healthSummary string) {
-	var h struct {
-		Version, GOARCH string
-		Protocol        int
-	}
+	var h nodeVer
 	if i := strings.IndexByte(healthSummary, '{'); i >= 0 {
 		_ = json.Unmarshal([]byte(healthSummary[i:]), &h)
 	}
 	if h.Version != "" || h.GOARCH != "" || h.Protocol != 0 {
-		b.versions.Store(svid, nodeVer{Version: h.Version, GOARCH: h.GOARCH, Protocol: h.Protocol})
+		b.versions.Store(svid, h)
 	}
 }
 
@@ -144,6 +143,10 @@ func (b *Broker) LiveTunnels() []map[string]any {
 		if v, ok := b.versions.Load(svid); ok {
 			nv := v.(nodeVer)
 			m["version"], m["goarch"] = nv.Version, nv.GOARCH
+			m["goos"], m["shell"], m["os_version"] = nv.GOOS, nv.Shell, nv.OSVersion
+			if supported, present := nv.Capabilities["self_update"]; present {
+				m["self_update_supported"] = supported
+			}
 			m["protocol"] = nv.Protocol // 0 = node predates protocol reporting
 		}
 		out = append(out, m)
@@ -169,9 +172,13 @@ func (b *Broker) forceUpdate(svid string) {
 // channel, and if so relays the Orthanc-signed binary down the tunnel to
 // /update/apply. RCON verifies the signature itself before applying.
 func (b *Broker) maybeUpdate(svid, healthSummary string) {
-	var h struct{ Version, GOOS, GOARCH string }
+	var h nodeVer
 	if i := strings.IndexByte(healthSummary, '{'); i >= 0 {
 		_ = json.Unmarshal([]byte(healthSummary[i:]), &h)
+	}
+	if supported, present := h.Capabilities["self_update"]; present && !supported {
+		log.Printf("broker: %s reports manual updates only; skipping automatic update", svid)
+		return
 	}
 	out, err := b.control.updateFor(svid, h.Version, h.GOOS, h.GOARCH)
 	if err != nil {
@@ -447,6 +454,10 @@ func (b *Broker) LiveSVIDs() []string {
 
 // HostInfo is one reachable node, as a human would refer to it.
 type HostInfo struct {
+	GOOS        string `json:"goos,omitempty"`
+	GOARCH      string `json:"goarch,omitempty"`
+	Shell       string `json:"shell,omitempty"`
+	OSVersion   string `json:"os_version,omitempty"`
 	Name        string `json:"name"`        // operator-assigned bound_name (may be an opaque hostname)
 	Description string `json:"description"` // operator-set human role ("the database box") — maps intent→node
 	SVID        string `json:"svid"`        // full SPIFFE id
@@ -465,10 +476,15 @@ func (b *Broker) LiveHosts() []HostInfo {
 	b.tunnels.Range(func(k, _ any) bool {
 		svid := k.(string)
 		e := meta[svid]
-		out = append(out, HostInfo{
+		h := HostInfo{
 			Name: e.BoundName, Description: e.Description,
 			SVID: svid, NodeID: nodeIDOf(svid), Online: true,
-		})
+		}
+		if v, ok := b.versions.Load(svid); ok {
+			nv := v.(nodeVer)
+			h.GOOS, h.GOARCH, h.Shell, h.OSVersion = nv.GOOS, nv.GOARCH, nv.Shell, nv.OSVersion
+		}
+		out = append(out, h)
 		return true
 	})
 	return out

@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-	etc := flag.String("etc", "/nfs/pow3rtool/XConnect/etc", "identity dir (cert/key/ca-bundle)")
+	etc := flag.String("etc", "/etc/xconnect", "identity dir (cert/key/ca-bundle)")
 	controlURL := flag.String("control-url", envOr("XCONNECT_CONTROL_URL", "https://127.0.0.1:8443"), "Orthanc control listener")
 	serverID := flag.String("server-id", envOr("XCONNECT_CONTROL_SERVER_ID", "spiffe://pow3rtool/system/orthanc-control"), "expected control-server SPIFFE id")
 	brokerPort := flag.String("broker-port", "3", "RCON reverse-dial broker port (raw cert-gated mTLS)")
@@ -27,7 +27,7 @@ func main() {
 	adminAddr := flag.String("admin-addr", "", "serve: unauthenticated admin/ops escape hatch — OFF by default. Set to a unix socket path (0600, e.g. /run/xconnect/admin.sock) or a loopback host:port to enable for live debugging")
 	callerAddr := flag.String("caller-addr", "127.0.0.1:8780", "serve: Caller/MCP webservice (behind nginx)")
 	bootstrapAddr := flag.String("bootstrap-addr", "127.0.0.1:8790", "serve: certless node-enroll ingress (behind nginx /bootstrap)")
-	bootstrapBinDir := flag.String("bootstrap-bin-dir", "/nfs/pow3rtool/RCON/dist", "serve: dir of rcon-<os>-<arch> binaries to hand out at /bootstrap/binary")
+	bootstrapBinDir := flag.String("bootstrap-bin-dir", "/var/lib/xconnect/binaries", "serve: dir of rcon-<os>-<arch> binaries to hand out at /bootstrap/binary")
 	authMode := flag.String("auth-mode", envOr("XCONNECT_AUTH_MODE", "entra"), "serve: token validation mode (entra|dev)")
 	audience := flag.String("audience", os.Getenv("XCONNECT_AUDIENCE"), "serve: expected token audience (env XCONNECT_AUDIENCE)")
 	tenantID := flag.String("tenant-id", os.Getenv("AZURE_TENANT_ID"), "serve: Entra tenant id (env AZURE_TENANT_ID)")

@@ -48,9 +48,11 @@ mcp = FastMCP(
         "Use `remote_jobs` instead for anything long-running — it survives tunnel blips and "
         "is reattachable.\n\n"
         "ARGUMENTS: every run takes `node` (the target) and `command` (the shell line to run, "
-        "exactly as you'd type in bash, e.g. `hostname && uname -a`). Commands execute via "
-        "`bash -lc` on the node.\n\n"
-        "AUTH: calls run under YOUR identity (per-user OAuth) and are authorized centrally per "
+        "using the target node's shell syntax). Check goos/shell in list_remote_hosts: "
+        "Linux uses Bash; Windows uses Windows PowerShell 5.1 without a profile. "
+        "Do not send Bash syntax to Windows (PowerShell 5.1 has no && operator).\n\n"
+        "AUTH: calls are authorized under YOUR identity (per-user OAuth); commands execute "
+        "under the node's configured service account (often root/SYSTEM). Authorization is per "
         "node+verb; an unauthorized call returns a 403 with the reason — that is policy, not a "
         "bug to route around."
     ),
@@ -204,7 +206,7 @@ _NODE = Annotated[
             "node, then target it by its exact `node_id`. Passing an ambiguous value "
             "returns a 409 with candidate nodes — re-issue with one exact node_id."
         ),
-        examples=["bb087e37-88b9-4df4-8b4c-f8ba4608666d", "host-7q2x"],
+        examples=["11111111-1111-4111-8111-111111111111", "host-7q2x"],
     ),
 ]
 _COMMAND = Annotated[
@@ -213,7 +215,8 @@ _COMMAND = Annotated[
         default="",
         description=(
             "The shell command line to run on the node, exactly as typed in a terminal "
-            "(executed via `bash -lc`). Example: 'hostname && uname -a'."
+            "(Linux: Bash; Windows: PowerShell 5.1). Check list_remote_hosts goos/shell first. "
+            "Examples: Linux 'hostname && uname -a'; Windows 'Get-Service'."
         ),
         examples=["hostname && uname -a", "df -h /", "systemctl is-active nginx"],
     ),
@@ -250,7 +253,8 @@ def remote_run(
     """Run a ONE-SHOT shell command on a managed node and return its output.
 
     The remote equivalent of running a command in a terminal: the line runs via
-    `bash -lc` on the target node and you get back stdout/stderr + exit code
+    Bash on Linux or PowerShell 5.1 on Windows; check the host's goos/shell first.
+    You get back stdout/stderr + exit code
     (output is size-bounded). Use this for quick commands that finish in seconds;
     for anything long-running use `remote_jobs` instead (it survives tunnel blips).
 
@@ -424,7 +428,8 @@ def list_remote_hosts(
 ) -> ToolCallResult:
     """Discover the nodes you can reach, BY HUMAN NAME. Start here to find a target.
 
-    Returns each host as {name, description, svid, node_id, online}, plus
+    Returns each host as {name, description, svid, node_id, online, goos, goarch,
+    shell, os_version} (runtime fields omitted when unknown), plus
     `total_matched` and `total_online`. `name` is often an opaque hostname
     (e.g. "host-7q2x"); `description` is the human role ("primary database")
     that maps a user's term to the node. Pass the exact `node_id` (or exact name)

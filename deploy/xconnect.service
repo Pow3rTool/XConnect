@@ -13,14 +13,14 @@ Type=simple
 #   # place the service cert/key + xconnect.env under /etc/xconnect (0640, owned xconnect)
 User=xconnect
 Group=xconnect
-WorkingDirectory=/nfs/pow3rtool/XConnect
+WorkingDirectory=/opt/xconnect
 # Site-specific config (tenant/audience/control-url) comes from the env file so
 # the binary stays generic. Copy xconnect.env.example -> /etc/xconnect/xconnect.env.
 EnvironmentFile=/etc/xconnect/xconnect.env
 # --etc points at the LOCAL identity dir (copy the service cert/key + ca-bundle to
 # /etc/xconnect, owned by the xconnect user, key 0600) — never depend on a shared
 # mount for the data plane's own identity. control-url + audience come from the env.
-ExecStart=/nfs/pow3rtool/XConnect/xconnect --heartbeat 20s --bootstrap-bin-dir /nfs/pow3rtool/RCON/dist --etc /etc/xconnect serve
+ExecStart=/opt/xconnect/xconnect --heartbeat 20s --bootstrap-bin-dir /var/lib/xconnect/binaries --etc /etc/xconnect serve
 Restart=on-failure
 RestartSec=5s
 

@@ -97,6 +97,11 @@ func (b *Bootstrap) binary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := filepath.Join(b.binDir, fmt.Sprintf("rcon-%s-%s", goos, goarch))
+	filename := "rcon"
+	if goos == "windows" {
+		path += ".exe"
+		filename += ".exe"
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		bootJSON(w, 404, map[string]any{"error": fmt.Sprintf("no binary for %s/%s", goos, goarch)})
@@ -104,7 +109,7 @@ func (b *Bootstrap) binary(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", "attachment; filename=rcon")
+	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
 	_, _ = io.Copy(w, f)
 }
 

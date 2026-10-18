@@ -1,0 +1,23 @@
+hosts.json
+*.bak
+*.bak.*
+__pycache__/
+*.pyc
+venv/
+.env
+*.pem
+*.key
+id_*
+
+# build output
+/xconnect
+/XConnect
+
+# local state / stray artifacts (never commit binary DBs)
+*.db
+*.sqlite
+*.sqlite3
+
+# Operator-generated identity pins must never be published.
+/identity_deployment_local.go
+*.private.json
